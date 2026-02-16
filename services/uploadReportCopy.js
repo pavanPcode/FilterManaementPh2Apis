@@ -11,7 +11,7 @@ const router = express.Router();
 // Get upload folder from .env
 // const uploadFolder = path.join(__dirname, '..', process.env.UPLOAD_FOLDER);
 // const uploadFolder = process.env.UPLOAD_FOLDER
-const uploadFolder = ''
+const uploadFolder = '/'
 
 // Create folder if it doesn't exist
 if (!fs.existsSync(uploadFolder)) {
