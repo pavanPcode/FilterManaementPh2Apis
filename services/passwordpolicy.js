@@ -1,0 +1,2408 @@
+const express = require("express");
+const sql = require("mssql");
+const bcrypt = require("bcryptjs");
+const { OperationEnums } = require("../utilityEnum.js");
+const dbUtility = require("../dal/dbUtility.js");
+const { handleRecord,handleRecordWithOutRes, } = require("../dal/dbspconn.js");
+// const { v4: uuidv4 } = require('uuid');
+// const { v4: uuidv4 } = require("uuid");
+const newSessionId = crypto.randomUUID();
+const { getIstDate, getIstTime, getIstDateTime } = require('../utilities/dateUtil.js');
+const { setupWebSocket, notifyLogout,activeConnections } = require("../websocketconn/wsServer.js");
+
+const passwordpolicyRoutes = express.Router();
+
+require('dotenv').config(); // load environment variables from .env.
+const net = require('net');
+
+
+
+
+
+const getPolicy = async () => {
+  try {
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+
+    
+    const result = await pool.request().query`SELECT TOP 1 * FROM dbo.PasswordPolicy`;
+    // const result = await sql.query`SELECT TOP 1 * FROM dbo.PasswordPolicy`;
+    const row = result.recordset[0];
+    console.log('row"-----',row)
+    return row || {
+      MinLength: 8,
+      RequireUppercase: 1,
+      RequireLowercase: 1,
+      RequireDigit: 1,
+      RequireSpecialChar: 1,
+      ExpiryDays: 90,
+      MaxFailedAttempts: 5,
+      ReuseHistoryCount: 5,
+      LockoutDurationMinutes: 15,
+    };
+  } catch (e) {
+    console.log("Policy fetch error:", e);
+    return {
+      MinLength: 8,
+      RequireUppercase: 1,
+      RequireLowercase: 1,
+      RequireDigit: 1,
+      RequireSpecialChar: 1,
+      ExpiryDays: 90,
+      MaxFailedAttempts: 5,
+      ReuseHistoryCount: 5,
+      LockoutDurationMinutes: 15,
+    };
+  }
+};
+
+// const validatePassword = (password, policy) => {
+//   if (password.length <= policy.MinLength-1)
+//     return [false, `Password must be at least ${policy.MinLength} characters`];
+//   if (policy.RequireUppercase && !/[A-Z]/.test(password))
+//     return [false, "Must include an uppercase letter"];
+//   if (policy.RequireLowercase && !/[a-z]/.test(password))
+//     return [false, "Must include a lowercase letter"];
+//   if (policy.RequireDigit && !/\d/.test(password))
+//     return [false, "Must include a digit"];
+//   if (policy.RequireSpecialChar && !/[\W_]/.test(password))
+//     return [false, "Must include a special character"];
+//   return [true, "Valid"];
+// };
+const validatePassword = (password, policy) => {
+  if (password.length < policy.MinLength)
+    return [false, `Password must be at least ${policy.MinLength} characters`];
+
+  const uppercaseCount = (password.match(/[A-Z]/g) || []).length;
+  if (uppercaseCount < policy.RequireUppercase)
+    return [false, `Must include at least ${policy.RequireUppercase} uppercase letter(s)`];
+
+  const lowercaseCount = (password.match(/[a-z]/g) || []).length;
+  if (lowercaseCount < policy.RequireLowercase)
+    return [false, `Must include at least ${policy.RequireLowercase} lowercase letter(s)`];
+
+  const digitCount = (password.match(/\d/g) || []).length;
+  if (digitCount < policy.RequireDigit)
+    return [false, `Must include at least ${policy.RequireDigit} digit(s)`];
+
+  const specialCharCount = (password.match(/[\W_]/g) || []).length;
+  if (specialCharCount < policy.RequireSpecialChar)
+    return [false, `Must include at least ${policy.RequireSpecialChar} special character(s)`];
+
+  return [true, "Valid"];
+};
+
+function generateRandomPassword(policy) {
+  const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const lowercase = 'abcdefghijklmnopqrstuvwxyz';
+  const digits = '0123456789';
+  const special = '@#$%&*!';
+
+  let password = '';
+  let allChars = '';
+  
+  const getRandomChars = (chars, count) => {
+    let result = '';
+    for (let i = 0; i < count; i++) {
+      result += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return result;
+  };
+
+  // Add required characters
+  if (policy.RequireUppercase > 0) {
+    password += getRandomChars(uppercase, policy.RequireUppercase);
+    allChars += uppercase;
+  }
+
+  if (policy.RequireLowercase > 0) {
+    password += getRandomChars(lowercase, policy.RequireLowercase);
+    allChars += lowercase;
+  }
+
+  if (policy.RequireDigit > 0) {
+    password += getRandomChars(digits, policy.RequireDigit);
+    allChars += digits;
+  }
+
+  if (policy.RequireSpecialChar > 0) {
+    password += getRandomChars(special, policy.RequireSpecialChar);
+    allChars += special;
+  }
+
+  // Fill the rest to meet MinLength
+  const remainingLength = policy.MinLength - password.length;
+  password += getRandomChars(allChars, remainingLength);
+
+  // Shuffle the password
+  return password
+    .split('')
+    .sort(() => Math.random() - 0.5)
+    .join('');
+}
+
+
+// function generateRandomPassword(policy) {
+//   const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+//   const lowercase = 'abcdefghijklmnopqrstuvwxyz';
+//   const digits = '0123456789';
+//   const special = '@';
+//   let allChars = '';
+//   let password = '';
+
+//   if (policy.RequireUppercase) {
+//     password += uppercase[Math.floor(Math.random() * uppercase.length)];
+//     allChars += uppercase;
+//   }
+
+//   if (policy.RequireLowercase) {
+//     password += lowercase[Math.floor(Math.random() * lowercase.length)];
+//     allChars += lowercase;
+//   }
+
+//   if (policy.RequireDigit) {
+//     password += digits[Math.floor(Math.random() * digits.length)];
+//     allChars += digits;
+//   }
+
+//   if (policy.RequireSpecialChar) {
+//     password += special[Math.floor(Math.random() * special.length)];
+//     allChars += special;
+//   }
+
+//   // Fill the rest with random characters up to MinLength
+//   while (password.length < policy.MinLength) {
+//     password += allChars[Math.floor(Math.random() * allChars.length)];
+//   }
+
+//   // Shuffle password
+//   return password
+//     .split('')
+//     .sort(() => Math.random() - 0.5)
+//     .join('');
+// }
+
+
+async function addActivityLog(ActivityType, PerformedBy, Notes, Location = '') {
+  // console.log(ActivityType, PerformedBy, Notes, Location = '')
+  if (!ActivityType || !PerformedBy ) {
+    return { success: false, message: 'Missing required fields' };
+  }
+  let PerformedOn = new Date(); // assuming current timestamp
+
+  try {
+    // await sql.connect(dbConfig);
+    // await sql.query
+    // ✅ Ensure pool is initialized
+    await dbUtility.initializePool();
+    // pool = await sql.connect(dbConfig);
+    const pool = await dbUtility.getPool(); // use your shared/global pool
+
+    await pool.request().query`
+      INSERT INTO [dbo].[ActivityLog] (ActivityType, PerformedBy, PerformedOn, Notes, Location)
+      VALUES (${ActivityType}, ${PerformedBy}, DATEADD(MINUTE, 330, GETUTCDATE()), ${Notes}, ${Location})
+    `;
+    return { success: true, message: 'Activity inserted successfully' };
+  } catch (error) {
+    console.error('DB Insert Error:', error.message, error);
+    return { success: false, message: 'Failed to insert activity' };
+  }
+}
+async function addActivityLogWithSuccess(ActivityType, PerformedBy, Notes,Success, Location = '') {
+  // console.log(ActivityType, PerformedBy, Notes, Location = '')
+  if (!ActivityType || !PerformedBy ) {
+    return { success: false, message: 'Missing required fields' };
+  }
+  let PerformedOn = new Date(); // assuming current timestamp
+
+  try {
+        let data11 = {
+        ActivityType: ActivityType,
+        PerformedBy: PerformedBy.username,
+        Notes: Notes,
+        IsSucces: Success,
+        Location: "",
+        LogType: 1,
+      };
+
+      const result = await handleRecordWithOutRes(
+        data11,
+        OperationEnums().addUserActiLog
+      );
+
+    return { success: true, message: 'Activity inserted successfully' };
+  } catch (error) {
+    console.error('DB Insert Error:', error.message, error);
+    return { success: false, message: 'Failed to insert activity' };
+  }
+}
+
+passwordpolicyRoutes.post("/logout", (req, res) => {
+  const { UserID, SessionId, Loginversion } = req.body;
+  console.log('logout',UserID, SessionId, Loginversion)
+  if (!UserID || !SessionId) {
+    return res.status(400).json({
+      success: false,
+      message: "UserID and SessionId are required",
+    });
+  }
+
+  if (!activeConnections.has(UserID)) {
+    return res.json({
+      success: true,
+      message: "No active session found",
+    });
+  }
+
+  const connections = activeConnections.get(UserID);
+
+  connections.forEach(({ ws, SessionId: sId, login_version }) => {
+    if (
+      sId === SessionId &&
+      login_version === Loginversion &&
+      ws.readyState === WebSocket.OPEN
+    ) {
+      // 🔥 Same effect as WS LOGOUT
+      ws.send(JSON.stringify({ type: "FORCE_LOGOUT" }));
+      ws.close();
+    }
+  });
+
+  // Remove session from map
+  const remaining = connections.filter(
+    (c) =>
+      !(
+        c.SessionId === SessionId &&
+        c.login_version === Loginversion
+      )
+  );
+
+  if (remaining.length === 0) {
+    activeConnections.delete(UserID);
+  } else {
+    activeConnections.set(UserID, remaining);
+  }
+
+  console.log(`User ${UserID} logged out via API`);
+
+  return res.json({
+    success: true,
+    message: "Logged out successfully",
+  });
+});
+
+
+passwordpolicyRoutes.post("/registerPh2", async (req, res) => {
+  try {
+
+    // addActivityLog('26','','register' ,'');
+
+    const { username, name, role ,usertype } = req.body;
+    const policy = await getPolicy();
+
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+
+    const existing = await pool.request().query`SELECT COUNT(*) as count FROM dbo.Users WHERE Email = ${username}`;
+    // const existing = await sql.query`SELECT COUNT(*) as count FROM dbo.Users WHERE Email = ${username}`;
+    if (existing.recordset[0].count > 0)
+      return res.status(400).json({ Message: "username already exists", status: false, ResultData: [] });
+
+    const randomPassword = generateRandomPassword(policy);
+
+    console.log("Generated password:", randomPassword);
+
+
+    const [isValid, msg] = validatePassword(randomPassword, policy);
+    if (!isValid) return res.status(400).json({ Message: msg, status: false, ResultData: [] });
+
+    const hash_pw = await bcrypt.hash(randomPassword, 10);
+    // await sql.query`INSERT INTO dbo.Users (Name, Email, Role, PasswordHash) VALUES (${name}, ${username}, ${role}, ${hash_pw})`;
+    await pool.request().query`INSERT INTO dbo.Users (Name, Email, Role, PasswordHash,UserType) 
+    VALUES (${name}, ${username}, ${role}, ${hash_pw}, ${usertype})`;
+    await pool.request().query`
+  INSERT INTO Notifications (Title, Message, RoleID, Type)  
+  VALUES ('User Creation', ${`User ${username} Created Successfully`}, 2, 'role');`;
+
+    // const userIdResult = await sql.query`SELECT UserID FROM dbo.Users WHERE Email = ${username}`;
+    const userIdResult = await pool.request().query`SELECT UserID FROM dbo.Users WHERE Email = ${username}`;
+
+    const user_id = userIdResult.recordset[0].UserID;
+
+    const expiryDate = new Date(Date.now() + policy.ExpiryDays * 86400000);
+    // await sql.query`INSERT INTO dbo.UserSecurity (UserID, PasswordChangedOn, PasswordExpiryDate) VALUES (${user_id}, GETDATE(), ${expiryDate})`;
+    // await sql.query`INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) VALUES (${user_id}, ${hash_pw})`;
+    await pool.request().query`INSERT INTO dbo.UserSecurity (UserID, PasswordChangedOn, PasswordExpiryDate) VALUES (${user_id}, GETDATE(), ${expiryDate})`;
+    await pool.request().query`INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) VALUES (${user_id}, ${hash_pw})`;
+
+    res.status(201).json({ Message: "User registered successfully.", status: true, ResultData:  {TemporaryPassword:randomPassword} });
+  } catch (e) {
+    console.log("Register error:", e);
+    res.status(500).json({ Message: "Failed to register user.", status: false, ResultData:{} });
+  }
+});
+
+passwordpolicyRoutes.post("/register", async (req, res) => {
+  try {
+
+    // addActivityLog('26','','register' ,'');
+
+    const { username, name, role } = req.body;
+    const policy = await getPolicy();
+
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+
+    const existing = await pool.request().query`SELECT COUNT(*) as count FROM dbo.Users WHERE Email = ${username}`;
+    // const existing = await sql.query`SELECT COUNT(*) as count FROM dbo.Users WHERE Email = ${username}`;
+    if (existing.recordset[0].count > 0)
+      return res.status(400).json({ Message: "username already exists", status: false, ResultData: [] });
+
+    const randomPassword = generateRandomPassword(policy);
+
+    console.log("Generated password:", randomPassword);
+
+
+    const [isValid, msg] = validatePassword(randomPassword, policy);
+    if (!isValid) return res.status(400).json({ Message: msg, status: false, ResultData: [] });
+
+    const hash_pw = await bcrypt.hash(randomPassword, 10);
+    // await sql.query`INSERT INTO dbo.Users (Name, Email, Role, PasswordHash) VALUES (${name}, ${username}, ${role}, ${hash_pw})`;
+    await pool.request().query`INSERT INTO dbo.Users (Name, Email, Role, PasswordHash) 
+    VALUES (${name}, ${username}, ${role}, ${hash_pw})`;
+    await pool.request().query`
+  INSERT INTO Notifications (Title, Message, RoleID, Type)  
+  VALUES ('User Creation', ${`User ${username} Created Successfully`}, 2, 'role');`;
+
+    // const userIdResult = await sql.query`SELECT UserID FROM dbo.Users WHERE Email = ${username}`;
+    const userIdResult = await pool.request().query`SELECT UserID FROM dbo.Users WHERE Email = ${username}`;
+
+    const user_id = userIdResult.recordset[0].UserID;
+
+    const expiryDate = new Date(Date.now() + policy.ExpiryDays * 86400000);
+    // await sql.query`INSERT INTO dbo.UserSecurity (UserID, PasswordChangedOn, PasswordExpiryDate) VALUES (${user_id}, GETDATE(), ${expiryDate})`;
+    // await sql.query`INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) VALUES (${user_id}, ${hash_pw})`;
+    await pool.request().query`INSERT INTO dbo.UserSecurity (UserID, PasswordChangedOn, PasswordExpiryDate) VALUES (${user_id}, GETDATE(), ${expiryDate})`;
+    await pool.request().query`INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) VALUES (${user_id}, ${hash_pw})`;
+
+    res.status(201).json({ Message: "User registered successfully.", status: true, ResultData:  {TemporaryPassword:randomPassword} });
+  } catch (e) {
+    console.log("Register error:", e);
+    res.status(500).json({ Message: "Failed to register user.", status: false, ResultData:{} });
+  }
+});
+
+
+async function registerUser(data) {
+  try {
+    const { UserId, Name, Role } = data;
+    const username = UserId; // adjust if needed
+
+    const policy = await getPolicy();
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool();
+
+    // Check if already exists
+    const existing = await pool.request()
+      .query`SELECT COUNT(*) as count FROM dbo.Users WHERE Email = ${username}`;
+    if (existing.recordset[0].count > 0) {
+      return { success: false, msg: "Username already exists" };
+    }
+
+    const randomPassword = generateRandomPassword(policy);
+    const [isValid, msg] = validatePassword(randomPassword, policy);
+    if (!isValid) {
+      return { success: false, msg };
+    }
+
+    const hash_pw = await bcrypt.hash(randomPassword, 10);
+
+    await pool.request().query`
+      INSERT INTO dbo.Users (Name, Email, Role, PasswordHash) 
+      VALUES (${Name}, ${username}, ${Role}, ${hash_pw})`;
+    
+    await pool.request().query`
+  INSERT INTO Notifications (Title, Message, RoleID, Type)  
+  VALUES ('User Creation', ${`User ${username} Created Successfully`}, 2, 'role');`;
+
+
+    const userIdResult = await pool.request()
+      .query`SELECT UserID FROM dbo.Users WHERE Email = ${username}`;
+    const user_id = userIdResult.recordset[0].UserID;
+
+    const expiryDate = new Date(Date.now() + policy.ExpiryDays * 86400000);
+    await pool.request().query`
+      INSERT INTO dbo.UserSecurity (UserID, PasswordChangedOn, PasswordExpiryDate) 
+      VALUES (${user_id}, GETDATE(), ${expiryDate})`;
+    await pool.request().query`
+      INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) 
+      VALUES (${user_id}, ${hash_pw})`;
+
+    return { success: true, tempPassword: randomPassword };
+  } catch (e) {
+    console.error("registerUser error:", e);
+    return { success: false, msg: "Failed to register user" };
+  }
+}
+
+
+
+passwordpolicyRoutes.post("/api/updateRequestUser", async (req, res) => {
+  const data = { ...req.body };
+  try {
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool();
+
+    // Step 1: Update Request_User table
+    await pool.request()
+      .input("Status", data.Status)
+      .input("CreatedBy", data.CreatedBy)
+      .input("UserId", data.UserId)
+      .query(`
+        UPDATE [dbo].[Request_User] 
+        SET Status = @Status, CreatedBy = @CreatedBy, UpdatedOn = GETDATE() 
+        WHERE UserId = @UserId
+      `);
+
+    // Step 2: If Status = 2, then register user
+    if (data.Status === 2) {
+      const result = await registerUser(data);
+
+      if (!result.success) {
+        return res.status(400).json({
+          Message: result.msg,
+          status: false,
+          ResultData: {}
+        });
+      }
+
+      return res.status(201).json({
+        Message: "User registered successfully.",
+        status: true,
+        ResultData: { TemporaryPassword: result.tempPassword }
+      });
+    }
+
+    // Otherwise just success for update
+    return res.status(200).json({
+      Message: "Request_User updated successfully.",
+      status: true,
+      ResultData: {}
+    });
+
+  } catch (e) {
+    console.error("updateRequestUser error:", e);
+    return res.status(500).json({
+      Message: "Error updating user",
+      status: false,
+      ResultData: {}
+    });
+  }
+});
+
+// passwordpolicyRoutes.post("/newlogin", async (req, res) => {
+//   try {
+//     const { username, password } = req.body;
+//     const policy = await getPolicy();
+
+//     await dbUtility.initializePool();
+//     const pool = await dbUtility.getPool(); 
+
+//     const result = await pool.request().query`
+//       SELECT u.UserID, u.PasswordHash, u.SessionId, u.Loginversion, 
+//              s.FailedLoginAttempts, s.IsLocked,
+//              s.PasswordExpiryDate, s.LastFailedAttempt, s.isTemporaryPassword,
+//              u.Role, RL.Name as RoleName, u.Name, u.email UserName, 
+//              (SELECT TOP 1 sessionTimeoutMinutes FROM dbo.PasswordPolicy) AS sessionTimeoutMinutes,
+//              u.isTerminated
+//       FROM dbo.Users u 
+//       INNER JOIN dbo.Roles RL ON u.Role = RL.Id
+//       JOIN dbo.UserSecurity s ON u.UserID = s.UserID
+//       WHERE u.Email = ${username};`;
+
+//     const row = result.recordset[0];
+//     if (!row) {
+//       addActivityLogWithSuccess('27',{username},'User not found',0,'');
+//       return res.status(404).json({
+//         Message: "User not found",
+//         status: false,
+//         ResultData: []
+//       });
+//     }
+
+//     if (row.isTerminated) {
+//       addActivityLogWithSuccess('27',{username},'User not found',0 ,'');
+//       return res.status(403).json({
+//         Message: "User account disabled",
+//         status: false,
+//         ResultData: []
+//       });
+//     }
+
+//     let { UserID, PasswordHash, FailedLoginAttempts, IsLocked, PasswordExpiryDate, LastFailedAttempt,
+//           isTemporaryPassword, Role, RoleName, Name, sessionTimeoutMinutes, UserName, Loginversion } = row;
+
+//     const forgotReqResult = await pool.request().query`
+//       SELECT COUNT(*) AS count 
+//       FROM dbo.ForgotPasswordRequests 
+//       WHERE UserID = ${UserID} AND IsResolved = 0`;
+
+//     if (forgotReqResult.recordset[0].count > 0) {
+//       return res.status(403).json({
+//         Message: "Password reset request is pending. Contact admin to get temporary password.",
+//         status: false,
+//         ResultData: []
+//       });
+//     }
+
+//     if (IsLocked) {
+//       addActivityLogWithSuccess('27',{username},'Account is locked' ,0,'');
+//       return res.status(403).json({ Message: "Account is locked. Contact Admin to Unlock.", status: false, ResultData: [] });
+//     }
+
+//     if (new Date() > new Date(PasswordExpiryDate)) {
+//       addActivityLogWithSuccess('27',{username},'Password expired',0 ,'');
+//       return res.status(403).json({ Message: "Password expired. Please reset your password.", status: false, ResultData: [] });
+//     }
+
+//     const isMatch = await bcrypt.compare(password, PasswordHash);
+//   if (isMatch) {
+//   await pool.request().query`
+//     UPDATE dbo.UserSecurity 
+//     SET FailedLoginAttempts = 0, LastLogin = GETDATE() 
+//     WHERE UserID = ${UserID}`;
+
+//   // const newSessionId = uuidv4();
+//   const newSessionId = crypto.randomUUID();
+//   const newLoginVersion = (Loginversion || 0) + 1;
+
+//   await pool.request()
+//     .input("SessionId", sql.NVarChar(50), newSessionId)
+//     .input("Loginversion", sql.Int, newLoginVersion)
+//     .input("UserID", sql.Int, UserID)
+//     .query(`
+//       UPDATE dbo.Users
+//       SET SessionId = @SessionId, Loginversion = @Loginversion
+//       WHERE UserID = @UserID
+//     `);
+
+//   // notifyLogout(UserID, newSessionId);
+
+//   const roleMenuResult = await pool.request().query`
+//     SELECT rm.RoleId, rm.AppMenuId, rm.[Read], rm.[Write], rm.[Delete], rm.[Export],  
+//            am.MenuName, am.MenuPath, am.IconName, rm.id RoleMenuid
+//     FROM [dbo].[RoleMenu] rm
+//     INNER JOIN [dbo].[AppMenu] am ON am.id = rm.AppMenuId
+//     WHERE rm.RoleId = ${Role} and rm.IsActive = 1 and am.IsActive = 1`;
+
+//   const roleMenu = roleMenuResult.recordset;
+
+//   return res.json({ 
+//     Message: "Login successful", 
+//     status: true, 
+//     ResultData: {
+//       UserID,
+//       isTemporaryPassword,
+//       Role,
+//       RoleName,
+//       Name,
+//       sessionTimeoutMinutes,
+//       UserName,
+//       SessionId: newSessionId,      
+//       Loginversion: newLoginVersion  
+//     },
+//     roleMenu 
+//   });
+// }
+//     else {
+//       addActivityLogWithSuccess('27',{username},'Login Failed. Wrong Password',0 ,'');
+//       FailedLoginAttempts += 1;
+//       const isLocked = FailedLoginAttempts >= policy.MaxFailedAttempts ? 1 : 0;
+
+//       await pool.request().query`
+//         UPDATE dbo.UserSecurity 
+//         SET FailedLoginAttempts = ${FailedLoginAttempts}, 
+//             IsLocked = ${isLocked}, 
+//             LastFailedAttempt = GETDATE() 
+//         WHERE UserID = ${UserID}`;
+
+//       if (isLocked) {
+//         const recentNotification = await pool.request().query`
+//           SELECT TOP 1 CreatedAt 
+//           FROM Notifications 
+//           WHERE Type = 'role' 
+//             AND RoleID = 2 
+//             AND Title = 'Account Locked'
+//             AND Message LIKE '%${UserName}%'
+//           ORDER BY CreatedAt DESC`;
+
+//         let sendNotification = true;
+//         if (recentNotification.recordset.length > 0) {
+//           const lastSent = new Date(recentNotification.recordset[0].CreatedAt);
+//           const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+//           if (lastSent > oneHourAgo) sendNotification = false;
+//         }
+
+//         if (sendNotification) {
+//           await pool.request()
+//             .input('Title', sql.NVarChar(255), 'Account Locked')
+//             .input('Message', sql.NVarChar(sql.MAX), `User ${UserName} account has been locked due to too many failed attempts.`)
+//             .input('RoleID', sql.Int, 2)
+//             .input('Type', sql.NVarChar(20), 'role')
+//             .query(`
+//               INSERT INTO Notifications (Title, Message, RoleID, Type, CreatedAt)
+//               VALUES (@Title, @Message, @RoleID, @Type, GETDATE())
+//             `);
+//         }
+
+//         return res.status(403).json({
+//           Message: `Account is locked due to too many failed attempts. Contact Admin to Unlock.`,
+//           status: false,
+//           ResultData: []
+//         });
+//       }
+
+//       return res.status(403).json({ Message: "Incorrect password", status: false, ResultData: [] });
+//     }
+//   } catch (e) {
+//     // addActivityLogWithSuccess('27',{username},'Login Error',0 ,'');
+//     console.log("Login error:", e);
+//     res.status(500).json({ Message: "Login failed", status: false, ResultData: [] });
+//   }
+// });
+
+
+passwordpolicyRoutes.post("/loginws", async (req, res) => {
+  let username = null;
+  try {
+    const { username, password } = req.body;
+    const policy = await getPolicy();
+
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+
+    // const result = await sql.query
+    const result =   await pool.request().query`
+      SELECT u.UserID, u.PasswordHash, s.FailedLoginAttempts, s.IsLocked,
+             s.PasswordExpiryDate, s.LastFailedAttempt,s.isTemporaryPassword,u.Role,RL.Name as RoleName,u.Name,u.email  UserName, 
+              (SELECT TOP 1 sessionTimeoutMinutes FROM dbo.PasswordPolicy) AS sessionTimeoutMinutes
+               ,u.isTerminated,u.UserType,u.Loginversion
+      FROM dbo.Users 
+      u inner join dbo.Roles RL ON u.Role = RL.Id
+      JOIN dbo.UserSecurity s ON u.UserID = s.UserID
+      WHERE u.Email = ${username} ;`;
+
+    const row = result.recordset[0];
+    // if (!row) return res.status(404).json({ Message: "User not found", status: false, ResultData: [] });
+    if (!row) {
+      addActivityLogWithSuccess('27',{username},'User not found',0,'');
+      return res.status(404).json({
+        Message: "User not found",
+        status: false,
+        ResultData: []
+      });
+    }
+    if (row.isTerminated) {
+      addActivityLogWithSuccess('27',{username},'User not found',0 ,'');
+  return res.status(403).json({
+    
+    Message: "User account disabled",
+    status: false,
+    ResultData: []
+  });
+}
+
+    let { UserID, PasswordHash, FailedLoginAttempts, IsLocked, PasswordExpiryDate, LastFailedAttempt,
+      isTemporaryPassword,Role,RoleName,Name,sessionTimeoutMinutes,UserName,UserType,Loginversion} = row;
+
+    //forget password check
+    // Block login if user requested forgot password
+    // const forgotReqResult = await sql.query`
+    //   SELECT COUNT(*) AS count 
+    //   FROM dbo.ForgotPasswordRequests 
+    //   WHERE UserID = ${UserID} AND IsResolved = 0`;
+    const forgotReqResult = await pool.request().query`
+      SELECT COUNT(*) AS count 
+      FROM dbo.ForgotPasswordRequests 
+      WHERE UserID = ${UserID} AND IsResolved = 0`;
+
+    if (forgotReqResult.recordset[0].count > 0) {
+      return res.status(403).json({
+        Message: "Password reset request is pending. Contact admin to get temporary password.",
+        status: false,
+        ResultData: []
+      });
+    }
+
+
+
+    if (IsLocked) {
+      addActivityLogWithSuccess('27',{username},'Account is locked' ,0,'');
+      return res.status(403).json({ Message: "Account is locked. Contact Admin to Unlock.", status: false, ResultData: [] });
+    }
+
+    if (new Date() > new Date(PasswordExpiryDate)) {
+      addActivityLogWithSuccess('27',{username},'Password expired',0 ,'');
+      return res.status(403).json({ Message: "Password expired. Please reset your password.", status: false, ResultData: [] });
+    }
+
+    const isMatch = await bcrypt.compare(password, PasswordHash);
+    if (isMatch) {
+      // await sql.query`UPDATE dbo.UserSecurity SET FailedLoginAttempts = 0, LastLogin = GETDATE() WHERE UserID = ${UserID}`;
+      await pool.request().query`UPDATE dbo.UserSecurity SET FailedLoginAttempts = 0, LastLogin = GETDATE() WHERE UserID = ${UserID}`;
+  
+    // const newSessionId = uuidv4();
+  // const newSessionId = crypto.randomUUID();
+  // const newLoginVersion = (Loginversion || 0) + 1;
+
+  // await pool.request()
+  //   .input("SessionId", sql.NVarChar(50), newSessionId)
+  //   .input("Loginversion", sql.Int, newLoginVersion)
+  //   .input("UserID", sql.Int, UserID)
+  //   .query(`
+  //     UPDATE dbo.Users
+  //     SET SessionId = @SessionId, Loginversion = @Loginversion
+  //     WHERE UserID = @UserID
+  //   `);
+  // let newSessionId = row.SessionId || crypto.randomUUID();
+  let newSessionId = username;
+  let newLoginVersion = (row.Loginversion || 0) + 1;
+
+// Update DB only if SessionId was null or login version changed
+await pool.request()
+  .input("SessionId", sql.NVarChar(50), newSessionId)
+  .input("Loginversion", sql.Int, newLoginVersion)
+  .input("UserID", sql.Int, UserID)
+  .query(`
+    UPDATE dbo.Users
+    SET SessionId = @SessionId, Loginversion = @Loginversion
+    WHERE UserID = @UserID
+  `);
+
+      const roleMenuResult = await pool.request().query`
+        SELECT   rm.RoleId, rm.AppMenuId, rm.[Read], rm.[Write],  rm.[Delete], rm.[Export],  am.MenuName, am.MenuPath, am.IconName,rm.id RoleMenuid
+          FROM [dbo].[RoleMenu] rm
+          INNER JOIN [dbo].[AppMenu] am ON am.id = rm.AppMenuId
+        WHERE rm.RoleId = ${Role} and rm.IsActive = 1 and am.IsActive = 1`;
+
+      // Extract the recordset from the result
+      const roleMenu = roleMenuResult.recordset;
+
+      return res.json({ Message: "Login successful", status: true, ResultData: {UserID:UserID,isTemporaryPassword:isTemporaryPassword,Role:Role,RoleName:RoleName,Name:Name,sessionTimeoutMinutes:sessionTimeoutMinutes,UserName:UserName,UserType,
+      SessionId: newSessionId,      
+      Loginversion: newLoginVersion  },roleMenu });
+    } 
+    else {
+      addActivityLogWithSuccess('27',{username},'Login Failed. Wrong Password',0 ,'');
+      FailedLoginAttempts += 1;
+      const isLocked = FailedLoginAttempts >= policy.MaxFailedAttempts ? 1 : 0;
+      // await sql.query`UPDATE dbo.UserSecurity SET FailedLoginAttempts = ${FailedLoginAttempts}, IsLocked = ${isLocked}, LastFailedAttempt = GETDATE() WHERE UserID = ${UserID}`;
+      await pool.request().query`UPDATE dbo.UserSecurity SET FailedLoginAttempts = ${FailedLoginAttempts}, IsLocked = ${isLocked}, LastFailedAttempt = GETDATE() WHERE UserID = ${UserID}`;
+
+      if (isLocked)
+        {
+        // Check if a lock notification was sent in the last hour
+        const recentNotification = await pool.request().query`
+          SELECT TOP 1 CreatedAt 
+          FROM Notifications 
+          WHERE Type = 'role' 
+            AND RoleID = 2 
+            AND Title = 'Account Locked'
+            AND Message LIKE '%${UserName}%'
+          ORDER BY CreatedAt DESC`;
+
+        let sendNotification = true;
+        if (recentNotification.recordset.length > 0) {
+          const lastSent = new Date(recentNotification.recordset[0].CreatedAt);
+          const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+          if (lastSent > oneHourAgo) {
+            sendNotification = false;
+          }
+        }
+
+        if (sendNotification) {
+          await pool.request()
+            .input('Title', sql.NVarChar(255), 'Account Locked')
+            .input('Message', sql.NVarChar(sql.MAX), `User ${UserName} account has been locked due to too many failed attempts.`)
+            .input('RoleID', sql.Int, 2) // Admin Role
+            .input('Type', sql.NVarChar(20), 'role')
+            .query(`
+              INSERT INTO Notifications (Title, Message, RoleID, Type, CreatedAt)
+              VALUES (@Title, @Message, @RoleID, @Type, GETDATE())
+            `);
+        }
+
+        return res.status(403).json({
+          Message: `Account is locked due to too many failed attempts. Contact Admin to Unlock.`,
+          status: false,
+          ResultData: []
+        });
+      }
+        // return res.status(403).json({ Message: `Account is locked due to too many failed attempts. Try again after ${policy.LockoutDurationMinutes} minutes.`, status: false, ResultData: [] }).;
+        // return res.status(403).json({ Message: `Account is locked due to too many failed attempts.  Contact Admin to Unlock.`, status: false, ResultData: [] });
+      return res.status(403).json({ Message: "Incorrect password", status: false, ResultData: [] });
+    }
+  } catch (e) {
+    addActivityLogWithSuccess('27',{username},'Login Error',0 ,'');
+    console.log("Login error:", e);
+    res.status(500).json({ Message: "Login failed", status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.post("/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const policy = await getPolicy();
+
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+
+    // const result = await sql.query
+    const result =   await pool.request().query`
+      SELECT u.UserID, u.PasswordHash, s.FailedLoginAttempts, s.IsLocked,
+             s.PasswordExpiryDate, s.LastFailedAttempt,s.isTemporaryPassword,u.Role,RL.Name as RoleName,u.Name,u.email  UserName, 
+              (SELECT TOP 1 sessionTimeoutMinutes FROM dbo.PasswordPolicy) AS sessionTimeoutMinutes
+               ,u.isTerminated,u.UserType
+      FROM dbo.Users u inner join dbo.Roles RL ON u.Role = RL.Id
+      JOIN dbo.UserSecurity s ON u.UserID = s.UserID
+      WHERE u.Email = ${username} ;`;
+
+    const row = result.recordset[0];
+    // if (!row) return res.status(404).json({ Message: "User not found", status: false, ResultData: [] });
+    if (!row) {
+      addActivityLogWithSuccess('27',{username},'User not found',0,'');
+      return res.status(404).json({
+        Message: "User not found",
+        status: false,
+        ResultData: []
+      });
+    }
+    if (row.isTerminated) {
+      addActivityLogWithSuccess('27',{username},'User not found',0 ,'');
+  return res.status(403).json({
+    
+    Message: "User account disabled",
+    status: false,
+    ResultData: []
+  });
+}
+
+    let { UserID, PasswordHash, FailedLoginAttempts, IsLocked, PasswordExpiryDate, LastFailedAttempt,isTemporaryPassword,Role,RoleName,Name,sessionTimeoutMinutes,UserName,UserType } = row;
+
+    //forget password check
+    // Block login if user requested forgot password
+    // const forgotReqResult = await sql.query`
+    //   SELECT COUNT(*) AS count 
+    //   FROM dbo.ForgotPasswordRequests 
+    //   WHERE UserID = ${UserID} AND IsResolved = 0`;
+    const forgotReqResult = await pool.request().query`
+      SELECT COUNT(*) AS count 
+      FROM dbo.ForgotPasswordRequests 
+      WHERE UserID = ${UserID} AND IsResolved = 0`;
+
+    if (forgotReqResult.recordset[0].count > 0) {
+      return res.status(403).json({
+        Message: "Password reset request is pending. Contact admin to get temporary password.",
+        status: false,
+        ResultData: []
+      });
+    }
+
+    // if (IsLocked) {
+    //   if (LastFailedAttempt && new Date() - new Date(LastFailedAttempt) > policy.LockoutDurationMinutes * 60000) {
+    //     await sql.query`UPDATE dbo.UserSecurity SET IsLocked = 0, FailedLoginAttempts = 0 WHERE UserID = ${UserID}`;
+    //     IsLocked = 0;
+    //   } else {
+    //     return res.status(403).json({ Message: "Account is locked. Try again later.", status: false, ResultData: [] });
+    //   }
+    // }
+
+    if (IsLocked) {
+      addActivityLogWithSuccess('27',{username},'Account is locked' ,0,'');
+      return res.status(403).json({ Message: "Account is locked. Contact Admin to Unlock.", status: false, ResultData: [] });
+    }
+
+    if (new Date() > new Date(PasswordExpiryDate)) {
+      addActivityLogWithSuccess('27',{username},'Password expired',0 ,'');
+      return res.status(403).json({ Message: "Password expired. Please reset your password.", status: false, ResultData: [] });
+    }
+
+    const isMatch = await bcrypt.compare(password, PasswordHash);
+    if (isMatch) {
+      // await sql.query`UPDATE dbo.UserSecurity SET FailedLoginAttempts = 0, LastLogin = GETDATE() WHERE UserID = ${UserID}`;
+      await pool.request().query`UPDATE dbo.UserSecurity SET FailedLoginAttempts = 0, LastLogin = GETDATE() WHERE UserID = ${UserID}`;
+  
+      // Fetch RoleMenu data
+      // const roleMenuResult = await sql.query`
+      //   SELECT   rm.RoleId, rm.AppMenuId, rm.[Read], rm.[Write],  rm.[Delete], rm.[Export],  am.MenuName, am.MenuPath, am.IconName,rm.id RoleMenuid
+      //     FROM [dbo].[RoleMenu] rm
+      //     INNER JOIN [dbo].[AppMenu] am ON am.id = rm.AppMenuId
+      //   WHERE rm.RoleId = ${Role} and rm.IsActive = 1 and am.IsActive = 1`;
+      const roleMenuResult = await pool.request().query`
+        SELECT   rm.RoleId, rm.AppMenuId, rm.[Read], rm.[Write],  rm.[Delete], rm.[Export],  am.MenuName, am.MenuPath, am.IconName,rm.id RoleMenuid
+          FROM [dbo].[RoleMenu] rm
+          INNER JOIN [dbo].[AppMenu] am ON am.id = rm.AppMenuId
+        WHERE rm.RoleId = ${Role} and rm.IsActive = 1 and am.IsActive = 1`;
+
+      // Extract the recordset from the result
+      const roleMenu = roleMenuResult.recordset;
+
+      return res.json({ Message: "Login successful", status: true, ResultData: {UserID:UserID,isTemporaryPassword:isTemporaryPassword,Role:Role,RoleName:RoleName,Name:Name,sessionTimeoutMinutes:sessionTimeoutMinutes,UserName:UserName,UserType},roleMenu });
+    } 
+    else {
+      addActivityLogWithSuccess('27',{username},'Login Failed. Wrong Password',0 ,'');
+      FailedLoginAttempts += 1;
+      const isLocked = FailedLoginAttempts >= policy.MaxFailedAttempts ? 1 : 0;
+      // await sql.query`UPDATE dbo.UserSecurity SET FailedLoginAttempts = ${FailedLoginAttempts}, IsLocked = ${isLocked}, LastFailedAttempt = GETDATE() WHERE UserID = ${UserID}`;
+      await pool.request().query`UPDATE dbo.UserSecurity SET FailedLoginAttempts = ${FailedLoginAttempts}, IsLocked = ${isLocked}, LastFailedAttempt = GETDATE() WHERE UserID = ${UserID}`;
+
+      if (isLocked)
+        {
+        // Check if a lock notification was sent in the last hour
+        const recentNotification = await pool.request().query`
+          SELECT TOP 1 CreatedAt 
+          FROM Notifications 
+          WHERE Type = 'role' 
+            AND RoleID = 2 
+            AND Title = 'Account Locked'
+            AND Message LIKE '%${UserName}%'
+          ORDER BY CreatedAt DESC`;
+
+        let sendNotification = true;
+        if (recentNotification.recordset.length > 0) {
+          const lastSent = new Date(recentNotification.recordset[0].CreatedAt);
+          const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+          if (lastSent > oneHourAgo) {
+            sendNotification = false;
+          }
+        }
+
+        if (sendNotification) {
+          await pool.request()
+            .input('Title', sql.NVarChar(255), 'Account Locked')
+            .input('Message', sql.NVarChar(sql.MAX), `User ${UserName} account has been locked due to too many failed attempts.`)
+            .input('RoleID', sql.Int, 2) // Admin Role
+            .input('Type', sql.NVarChar(20), 'role')
+            .query(`
+              INSERT INTO Notifications (Title, Message, RoleID, Type, CreatedAt)
+              VALUES (@Title, @Message, @RoleID, @Type, GETDATE())
+            `);
+        }
+
+        return res.status(403).json({
+          Message: `Account is locked due to too many failed attempts. Contact Admin to Unlock.`,
+          status: false,
+          ResultData: []
+        });
+      }
+        // return res.status(403).json({ Message: `Account is locked due to too many failed attempts. Try again after ${policy.LockoutDurationMinutes} minutes.`, status: false, ResultData: [] }).;
+        // return res.status(403).json({ Message: `Account is locked due to too many failed attempts.  Contact Admin to Unlock.`, status: false, ResultData: [] });
+      return res.status(403).json({ Message: "Incorrect password", status: false, ResultData: [] });
+    }
+  } catch (e) {
+    addActivityLogWithSuccess('27',{username},'Login Error',0 ,'');
+    console.log("Login error:", e);
+    res.status(500).json({ Message: "Login failed", status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.post("/adminChangePassword", async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    addActivityLog('28',PerformedBy,'adminChangePassword' ,'');
+
+    const { username } = req.body;
+    const policy = await getPolicy();
+
+    const new_password = generateRandomPassword(policy);
+
+    console.log("Generated password:", new_password);
+
+    const [isValid, msg] = validatePassword(new_password, policy);
+    if (!isValid) return res.status(400).json({ Message: msg, status: false, ResultData: [] });
+    
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+    // const result = await sql.query`SELECT UserID FROM dbo.Users WHERE Email = ${username}`;
+    const result = await pool.request().query`SELECT UserID FROM dbo.Users WHERE Email = ${username}`;
+
+    const row = result.recordset[0];
+    if (!row) return res.status(404).json({ Message: "User not found", status: false, ResultData: [] });
+
+    const user_id = row.UserID;
+    const new_hash = await bcrypt.hash(new_password, 10);
+
+    // const historyResult = await sql.query`SELECT TOP (${policy.ReuseHistoryCount}) PasswordHash FROM dbo.PasswordHistory WHERE UserID = ${user_id} ORDER BY ChangedOn DESC`;
+    const historyResult = await pool.request().query`SELECT TOP (${policy.ReuseHistoryCount}) PasswordHash FROM dbo.PasswordHistory WHERE UserID = ${user_id} ORDER BY ChangedOn DESC`;
+
+    for (let r of historyResult.recordset) {
+      if (await bcrypt.compare(new_password, r.PasswordHash)) {
+        return res.status(400).json({ Message: "Cannot reuse a recently used password.", status: false, ResultData: [] });
+      }
+    }
+
+    const expiryDate = new Date(Date.now() + policy.ExpiryDays * 86400000);
+    // console.log('user_id',user_id)
+    // await sql.query`UPDATE dbo.Users SET PasswordHash = ${new_hash} WHERE UserID = ${user_id}`;
+    // await sql.query`UPDATE dbo.UserSecurity SET PasswordChangedOn = GETDATE(), PasswordExpiryDate = ${expiryDate},isTemporaryPassword = 1,IsLocked=0 WHERE UserID = ${user_id}`;
+    // await sql.query`INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) VALUES (${user_id}, ${new_hash})`;
+    await pool.request().query`UPDATE dbo.Users SET PasswordHash = ${new_hash} WHERE UserID = ${user_id}`;
+    await pool.request().query`UPDATE dbo.UserSecurity SET PasswordChangedOn = GETDATE(), PasswordExpiryDate = ${expiryDate},isTemporaryPassword = 1,IsLocked=0 WHERE UserID = ${user_id}`;
+    await pool.request().query`INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) VALUES (${user_id}, ${new_hash})`;
+
+  //   // forget pasword update
+  //   await sql.query`
+  // UPDATE dbo.ForgotPasswordRequests 
+  // SET IsResolved = 1 
+  // WHERE UserID = ${user_id} AND IsResolved = 0`;
+  // forget pasword update
+  await pool.request().query`
+  UPDATE dbo.ForgotPasswordRequests 
+  SET IsResolved = 1 
+  WHERE UserID = ${user_id} AND IsResolved = 0`;
+
+
+
+    res.json({ message: "Password changed successfully.", status: true, ResultData:  {TemporaryPassword:new_password} });
+  } catch (e) {
+    console.log("Change password error:", e);
+    res.status(500).json({ message: "Failed to change password", status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post("/UserChangePassword", async (req, res) => {
+  try {
+
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    addActivityLog('29',PerformedBy,'UserChangePassword' ,'');
+
+    const { username, new_password, old_password } = req.body;
+    const policy = await getPolicy();
+
+    const [isValid, msg] = validatePassword(new_password, policy);
+    if (!isValid)
+      return res.status(400).json({ Message: msg, status: false, ResultData: [] });
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+    // Get user and password hash
+    // const result = await sql.query`
+    //   SELECT UserID, PasswordHash 
+    //   FROM dbo.Users 
+    //   WHERE Email = ${username}`;
+    const result = await pool.request().query`
+      SELECT UserID, PasswordHash 
+      FROM dbo.Users 
+      WHERE Email = ${username}`;
+    const row = result.recordset[0];
+
+    if (!row)
+      return res.status(404).json({ Message: "User not found", status: false, ResultData: [] });
+
+    const user_id = row.UserID;
+    const currentHash = row.PasswordHash;
+
+    // Check if old password matches current hash
+    const isOldPasswordCorrect = await bcrypt.compare(old_password, currentHash);
+    if (!isOldPasswordCorrect)
+      return res.status(400).json({ Message: "Old password is incorrect", status: false, ResultData: [] });
+
+    // Check if new password is in password history
+    // const historyResult = await sql.query`
+    //   SELECT TOP (${policy.ReuseHistoryCount}) PasswordHash 
+    //   FROM dbo.PasswordHistory 
+    //   WHERE UserID = ${user_id} 
+    //   ORDER BY ChangedOn DESC`;
+        const historyResult = await pool.request().query`
+      SELECT TOP (${policy.ReuseHistoryCount}) PasswordHash 
+      FROM dbo.PasswordHistory 
+      WHERE UserID = ${user_id} 
+      ORDER BY ChangedOn DESC`;
+
+    for (let r of historyResult.recordset) {
+      if (await bcrypt.compare(new_password, r.PasswordHash)) {
+        return res.status(400).json({
+          Message: "Cannot reuse a recently used password.",
+          status: false,
+          ResultData: [],
+        });
+      }
+    }
+
+    const new_hash = await bcrypt.hash(new_password, 10);
+    const expiryDate = new Date(Date.now() + policy.ExpiryDays * 86400000);
+
+    // await sql.query`UPDATE dbo.Users SET PasswordHash = ${new_hash} WHERE UserID = ${user_id}`;
+    // await sql.query`UPDATE dbo.UserSecurity 
+    //                 SET PasswordChangedOn = GETDATE(), 
+    //                     PasswordExpiryDate = ${expiryDate}, 
+    //                     isTemporaryPassword = 0 
+    //                 WHERE UserID = ${user_id}`;
+    // await sql.query`INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) VALUES (${user_id}, ${new_hash})`;
+
+    await pool.request().query`UPDATE dbo.Users SET PasswordHash = ${new_hash} WHERE UserID = ${user_id}`;
+    await pool.request().query`UPDATE dbo.UserSecurity 
+                    SET PasswordChangedOn = GETDATE(), 
+                        PasswordExpiryDate = ${expiryDate}, 
+                        isTemporaryPassword = 0 
+                    WHERE UserID = ${user_id}`;
+    await pool.request().query`INSERT INTO dbo.PasswordHistory (UserID, PasswordHash) VALUES (${user_id}, ${new_hash})`;
+
+
+    res.json({ message: "Password changed successfully.", status: true, ResultData: [] });
+  } catch (e) {
+    console.log("Change password error:", e);
+    res.status(500).json({ message: "Failed to change password", status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post("/forgotPassword", async (req, res) => {
+  try {
+    const { username } = req.body;
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+
+    // const userResult = await sql.query
+    // const userResult = await pool.request().query`
+    //   SELECT UserID, Email FROM dbo.Users WHERE Email = ${username} AND isTerminated = 0`;
+    const userResult = await pool.request().query`
+          SELECT UserID, Email, isTerminated
+          FROM dbo.Users 
+          WHERE Email = ${username};
+        `;
+
+    if (userResult.recordset.length === 0) {
+      return res.status(404).json({ Message: "User not found", status: false, ResultData: [] });
+    }
+
+    const { UserID, Email ,isTerminated } = userResult.recordset[0];
+
+    if (isTerminated) {
+  return res.status(403).json({
+    Message: "User account disabled",
+    status: false,
+    ResultData: {UserID:UserID}
+  });
+}
+
+    // Check if already requested and unresolved
+    // const existingReq = await sql.query
+    const existingReq = await pool.request().query`
+      SELECT COUNT(*) as count 
+      FROM dbo.ForgotPasswordRequests 
+      WHERE UserID = ${UserID} AND IsResolved = 0`;
+
+    if (existingReq.recordset[0].count > 0) {
+      return res.status(400).json({ Message: "Already requested. Please wait for admin response.", 
+        status: false, ResultData: {UserID:UserID} });
+    }
+
+    // Insert request
+    // await sql.query
+    await pool.request().query`
+      INSERT INTO dbo.ForgotPasswordRequests (UserID, Email) 
+      VALUES (${UserID}, ${Email})`;
+
+    // 4. Create notification for Admin
+    const notificationMessage = `User ${Email} has requested a password reset.`;
+    await pool.request()
+      .input('Title', sql.NVarChar(255), 'Forgot Password Request')
+      .input('Message', sql.NVarChar(sql.MAX), notificationMessage)
+      .input('RoleID', sql.Int, 2) // Admin RoleID
+      .input('Type', sql.NVarChar(20), 'role')
+      .query(`
+        INSERT INTO Notifications (Title, Message, RoleID, Type)
+        VALUES (@Title, @Message, @RoleID, @Type)
+      `);
+
+    res.json({ Message: "Forgot password request submitted successfully.", status: true, ResultData: {UserID:UserID} });
+
+  } catch (e) {
+    console.log("Forgot Password Error:", e);
+    res.status(500).json({ Message: "Failed to submit request.", status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.get("/getForgotPasswordRequests", async (req, res) => {
+  try {
+    // const result = await sql.query
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+
+    const result =   await pool.request().query`
+      SELECT f.Id, f.UserID, f.Email, f.RequestedOn, u.Name
+      FROM dbo.ForgotPasswordRequests f
+      JOIN dbo.Users u ON u.UserID = f.UserID
+      WHERE f.IsResolved = 0
+      order by f.Id desc`;
+
+    res.json({ Message: "Fetched requests", status: true, ResultData: result.recordset });
+  } catch (e) {
+    console.log("Fetch forgot requests error:", e);
+    res.status(500).json({ Message: "Failed to fetch requests", status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post("/updatepasswordPolicy", async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    // addActivityLog('30',PerformedBy,'updatepasswordPolicy' ,'');
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+    const d = req.body;
+    const result = await pool.request().query`SELECT COUNT(*) as count FROM dbo.PasswordPolicy`;
+    const count = result.recordset[0].count;
+
+    if (count === 0) {
+      await pool.request().query`INSERT INTO dbo.PasswordPolicy (MinLength, RequireUppercase,
+       RequireLowercase, RequireDigit, RequireSpecialChar, ExpiryDays, MaxFailedAttempts,
+        ReuseHistoryCount, LockoutDurationMinutes,sessionTimeoutMinutes,notifyBeforeDays) 
+      VALUES (${d.MinLength || 8}, ${d.RequireUppercase || 1}, ${d.RequireLowercase || 1},
+       ${d.RequireDigit || 1}, ${d.RequireSpecialChar || 1}, ${d.ExpiryDays || 90},
+        ${d.MaxFailedAttempts || 5}, ${d.ReuseHistoryCount || 5}, ${d.LockoutDurationMinutes || 15},
+         ${d.sessionTimeoutMinutes || 5}), ${d.notifyBeforeDays || 3})`;
+    } else {
+      await pool.request().query`UPDATE dbo.PasswordPolicy SET MinLength = ${d.MinLength || 8}, 
+      RequireUppercase = ${d.RequireUppercase || 1}, RequireLowercase = ${d.RequireLowercase || 1}, 
+      RequireDigit = ${d.RequireDigit || 1}, RequireSpecialChar = ${d.RequireSpecialChar || 1}, 
+      ExpiryDays = ${d.ExpiryDays || 90}, MaxFailedAttempts = ${d.MaxFailedAttempts || 5}, 
+      ReuseHistoryCount = ${d.ReuseHistoryCount || 5}, 
+      LockoutDurationMinutes = ${d.LockoutDurationMinutes || 15},
+       sessionTimeoutMinutes = ${d.sessionTimeoutMinutes || 5},notifyBeforeDays = ${d.notifyBeforeDays || 5}`;
+    }
+
+    res.json({ message: "Password policy saved successfully.", status: true, ResultData: [] });
+  } catch (e) {
+    console.log("Policy save error:", e);
+    res.status(500).json({ error: "Failed to save password policy.", status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.get("/getPasswordPolicy", async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    // addActivityLog('31',PerformedBy,'getPasswordPolicy' ,'');
+    // const result = await sql.query`SELECT TOP 1 * FROM dbo.PasswordPolicy`;
+    await dbUtility.initializePool();
+    const pool = await dbUtility.getPool(); 
+
+    const result = await pool.request().query`SELECT TOP 1 * FROM dbo.PasswordPolicy`;
+    const row = result.recordset[0];
+
+    if (!row) return res.status(404).json({ error: "No password policy configured.", status: false, ResultData: [] });
+
+    res.json({ error: "", status: false, ResultData: row });
+  } catch (e) {
+    console.log("Policy fetch error:", e);
+    res.status(500).json({ error: "Failed to fetch password policy.", status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.post('/addActivity', async (req, res) => {
+  try {
+    // console.log(req.body)
+    const { ActivityType, PerformedBy, PerformedOn, Notes, Location,IsSucces } = req.body;
+    // console.log(ActivityType, PerformedBy, PerformedOn, Notes, Location,IsSucces)
+    if (!ActivityType  || !PerformedOn) {
+      return res.status(400).json({ message: 'Missing required fields', status: false, ResultData: []  });
+    }
+
+    const safeNotes = Notes || '';
+    const safeLocation = Location || '';
+
+    // await sql.connect(dbConfig);
+    // await sql.query
+    // ✅ Ensure pool is initialized
+    await dbUtility.initializePool();
+    // pool = await sql.connect(dbConfig);
+    const pool = await dbUtility.getPool(); // use your shared/global pool
+
+    // await pool.request().query`
+    //   INSERT INTO [dbo].[ActivityLog] (ActivityType, PerformedBy, PerformedOn, Notes, Location,IsSucces,LogType)
+    //   VALUES (${ActivityType}, ${PerformedBy}, ${PerformedOn}, ${safeNotes}, ${safeLocation}, ${IsSucces}, 2)
+    // `;
+
+    await pool.request().query`
+      INSERT INTO [dbo].[ActivityLog] (ActivityType, PerformedBy, PerformedOn, Notes, Location,IsSucces,LogType)
+      VALUES (${ActivityType}, ${PerformedBy}, DATEADD(MINUTE, 330, GETUTCDATE()), ${safeNotes}, ${safeLocation}, ${IsSucces}, 2)
+    `;
+
+    res.json({ message: 'Activity inserted successfully', status: true, ResultData: []  });
+  } catch (error) {
+    console.error('Insert error:', error.message, error);  // Updated for better logs
+    res.status(500).json({ message: 'Failed to insert activity', status: false, ResultData: []  });
+  }
+});
+
+passwordpolicyRoutes.get('/getActivities', async (req, res) => {
+  try {
+    // await sql.connect(dbConfig);
+
+    // const result = await sql.query(
+    // ✅ Ensure pool is initialized
+    await dbUtility.initializePool();
+    // pool = await sql.connect(dbConfig);
+    const pool = await dbUtility.getPool(); // use your shared/global pool
+
+    const result =  await pool.request().query(`
+      SELECT TOP 500 p.ActivityType, p.PerformedBy, p.PerformedOn, p.Notes, p.Location ,p.IsSucces,p.LogType,pu.Name,ISNULL(pu.Email,p.PerformedBy) username
+      FROM [dbo].[ActivityLog]  p
+	  left join [dbo].[Users] pu on pu.UserID = p.PerformedBy
+      ORDER BY p.PerformedOn DESC
+    `);
+
+    res.json({
+      message: "Activities fetched successfully",
+      status: true,
+      ResultData: result.recordset
+    });
+  } catch (error) {
+    console.error("Fetch error:", error.message, error);
+    res.status(500).json({
+      message: "Failed to fetch activities",
+      status: false,
+      ResultData: []
+    });
+  }
+});
+
+
+passwordpolicyRoutes.get('/getActivitiesPg', async (req, res) => {
+  try {
+    // await sql.connect(dbConfig);
+    const pageNumber = parseInt(req.query.pageNumber) || '1';
+    const recordslimit = parseInt(req.query.recordslimit) || '50';
+    const offset = (pageNumber - 1) * recordslimit;
+
+    // const result = await sql.query(
+    // ✅ Ensure pool is initialized
+    await dbUtility.initializePool();
+    // pool = await sql.connect(dbConfig);
+    const pool = await dbUtility.getPool(); // use your shared/global pool
+
+    
+    const result =  await pool.request()
+    .input('limit', recordslimit)
+    .input('offset', offset)
+    .query(`
+      SELECT  p.ActivityType, p.PerformedBy, p.PerformedOn, p.Notes, p.Location 
+		  ,p.IsSucces,p.LogType,pu.Name,ISNULL(pu.Email,p.PerformedBy) username,
+		  COUNT(*) OVER() AS TotalCount,
+      CEILING(COUNT(*) OVER() * 1.0 / @limit) AS TotalPages
+      FROM [dbo].[ActivityLog]  p
+	    left join [dbo].[Users] pu on pu.UserID = p.PerformedBy
+      ORDER BY p.PerformedOn DESC
+	    OFFSET @offset ROWS
+      FETCH NEXT @limit ROWS ONLY;
+    `);
+
+    res.json({
+      message: "Activities fetched successfully",
+      status: true,
+      ResultData: result.recordset
+    });
+  } catch (error) {
+    console.error("Fetch error:", error.message, error);
+    res.status(500).json({
+      message: "Failed to fetch activities",
+      status: false,
+      ResultData: []
+    });
+  }
+});
+
+passwordpolicyRoutes.get('/getActivitiesAdvSearch', async (req, res) => {
+  try {
+    // await sql.connect(dbConfig);
+    const pageNumber = parseInt(req.query.pageNumber) || '1';
+    const Search = req.query.Search ? req.query.Search.trim() : '';
+    const recordslimit = parseInt(req.query.recordslimit) || '50';
+    const offset = (pageNumber - 1) * recordslimit;
+
+    // const result = await sql.query(
+    // ✅ Ensure pool is initialized
+    await dbUtility.initializePool();
+    // pool = await sql.connect(dbConfig);
+    const pool = await dbUtility.getPool(); // use your shared/global pool
+
+    
+    const result =  await pool.request()
+    .input('limit', recordslimit)
+    .input('offset', offset).input('Search', Search)
+    .query(`
+      	SELECT  p.ActivityType, p.PerformedBy, p.PerformedOn, p.Notes, p.Location 
+		  ,p.IsSucces,p.LogType,pu.Name,ISNULL(pu.Email,p.PerformedBy) username,
+		  COUNT(*) OVER() AS TotalCount,
+      CEILING(COUNT(*) OVER() * 1.0 / @limit) AS TotalPages
+      FROM [dbo].[ActivityLog]  p
+	    left join [dbo].[Users] pu on pu.UserID = p.PerformedBy
+      where (@Search = '' OR p.Notes LIKE '%' + @Search + '%')
+      ORDER BY p.PerformedOn DESC
+	    OFFSET @offset ROWS
+      FETCH NEXT @limit ROWS ONLY;
+    `);
+
+    res.json({
+      message: "Activities fetched successfully",
+      status: true,
+      ResultData: result.recordset
+    });
+  } catch (error) {
+    console.error("Fetch error:", error.message, error);
+    res.status(500).json({
+      message: "Failed to fetch activities",
+      status: false,
+      ResultData: []
+    });
+  }
+});
+
+// passwordpolicyRoutes.post('/addActivity', async (req, res) => {
+//   try {
+//     const { ActivityType, PerformedBy, Notes, Location } = req.body;
+
+//     const result = await addActivityLog(
+//       ActivityType,
+//       PerformedBy,
+//       Notes || '',
+//       Location || ''
+//     );
+
+//     if (!result.success) {
+//       return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+//     }
+
+//     res.json({ message: result.message, status: true, ResultData: [] });
+//   } catch (error) {
+//     console.error('Unexpected error:', error.message);
+//     res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+//   }
+// });
+
+'---------------------------------------------------'
+
+passwordpolicyRoutes.get('/GetAHUMachines', async (req, res) => {
+  try {
+    // let ActivityType = '1';
+    // let PerformedBy = '2';
+    // let Notes = 'GetAHUMachines';
+    // let Location = '';
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('1',PerformedBy,'GetAHUMachines' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.post('/AddAHUMachines', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('2',PerformedBy,'AddAHUMachines' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/EditAHUMachines', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('3',PerformedBy,'EditAHUMachines' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.post('/DeleteAHUMachines', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('4',PerformedBy,'DeleteAHUMachines' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/DeleteAHUFilters', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('5',PerformedBy,'DeleteAHUFilters' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/EditAHUFilters', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('6',PerformedBy,'EditAHUFilters' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+
+passwordpolicyRoutes.post('/AddAHUFilters', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('7',PerformedBy,'AddAHUFilters' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/GetAHUFilters', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('8',PerformedBy,'GetAHUFilters' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+
+passwordpolicyRoutes.post('/AHUFiltersUpdateStatus', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('9',PerformedBy,'AHUFiltersUpdateStatus' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.post('/AHUFilterGenerateBarcode', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('10',PerformedBy,'AHUFilterGenerateBarcode' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/getNotifications', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('11',PerformedBy,'getNotifications' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/AuditTrial', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('12',PerformedBy,'AuditTrial' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+
+passwordpolicyRoutes.get('/getSchedule', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+
+    const result = await addActivityLog('13',PerformedBy,'Schedule' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/getDeviationsAlarms', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+
+    const result = await addActivityLog('14',PerformedBy,'getDeviationsAlarms' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+// passwordpolicyRoutes.get('/getReplacementList', async (req, res) => {
+//   try {
+//     const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+//     const result = await addActivityLog('15',PerformedBy,'getReplacementList' ,'');
+
+//     if (!result.success) {
+//       return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+//     }
+//     res.json({ message: result.message, status: true, ResultData: [] });
+//   } catch (error) {
+//     console.error('Unexpected error:', error.message);
+//     res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+//   }
+// });
+
+passwordpolicyRoutes.get('/getRetirementList', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('16',PerformedBy,'getRetirementList' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/getUser', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('17',PerformedBy,'getUser' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/AddUser', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('18',PerformedBy,'AddUser' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/EditUser', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('19',PerformedBy,'EditUser' ,'');
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/DeleteUser', async (req, res) => {
+  try {
+    const result = await addActivityLog('20','2','DeleteUser' ,'');
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+passwordpolicyRoutes.get('/getRolePermissions', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('21',PerformedBy,'getRolePermissions' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/getFilterTypes', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('22',PerformedBy,'getFilterTypes' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/addFilterTypes', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('21',PerformedBy,'addFilterTypes' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/editFilterTypes', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('22',PerformedBy,'editFilterTypes' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.post('/deleteFilterTypes', async (req, res) => {
+  try {
+    const PerformedBy = req.body.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('23',PerformedBy,'deleteFilterTypes' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/getDashboard', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('24',PerformedBy,'getDashboard' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/getSidebar', async (req, res) => {
+  try {
+    const PerformedBy = req.query.PerformedBy || '2'; // default to '2' if not provided
+    const result = await addActivityLog('25',PerformedBy,'getSidebar' ,'');
+
+    if (!result.success) {
+      return res.status(400).json({ message: result.message, status: false, ResultData: [] });
+    }
+    res.json({ message: result.message, status: true, ResultData: [] });
+  } catch (error) {
+    console.error('Unexpected error:', error.message);
+    res.status(500).json({ message: 'Internal server error', status: false, ResultData: [] });
+  }
+});
+
+
+passwordpolicyRoutes.get('/runScheduleJob', async (req, res) => {
+  // let pool;
+  // const today = new Date();
+  // const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const todayDate = getIstDateTime();         // for SQL DATE
+  const inserted = [];
+
+  try {
+        // ✅ Ensure pool is initialized
+    await dbUtility.initializePool();
+
+    // pool = await sql.connect(dbConfig);
+    const pool = await dbUtility.getPool(); // use your shared/global pool
+
+
+    const result = await pool.request()
+      .input('TodayDate', sql.Date, todayDate)
+      .query(`
+      
+      ;WITH LastSchedule AS (
+          SELECT FilterId, MAX(ScheduledDate) AS LastScheduledDate
+          FROM dbo.AHUCleaningSchedule
+          GROUP BY FilterId
+        ),
+        DueAHUs AS (
+          SELECT ai.id AS FilterId,
+                 ISNULL(ai.cleaningFreqAllowance,0) AS cleaningFreq,
+                 ISNULL(ai.cleaningdays,0) AS cleaningDays,
+                 ISNULL(ls.LastScheduledDate, ai.LastCleaningDate) AS BaseDate
+          FROM [dbo].[Filter] ai
+          LEFT JOIN LastSchedule ls ON ai.id = ls.FilterId
+          WHERE ai.IsActive = 1
+            AND ISNULL(ai.LastCleaningDate,'1900-01-01') <> '1900-01-01'
+        ),
+        ToInsert AS (
+          SELECT d.FilterId
+          FROM DueAHUs d
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM dbo.AHUCleaningSchedule s
+            WHERE s.FilterId = d.FilterId AND s.ScheduledDate = @TodayDate
+          )
+          AND @TodayDate BETWEEN
+              DATEADD(DAY, -d.cleaningFreq + d.cleaningDays, d.BaseDate)
+              AND
+              DATEADD(DAY, d.cleaningFreq + d.cleaningDays, d.BaseDate)
+        )
+        INSERT INTO dbo.AHUCleaningSchedule (FilterId, ScheduledDate)
+        OUTPUT inserted.FilterId, inserted.ScheduledDate
+        SELECT FilterId, @TodayDate
+        FROM ToInsert;
+    ` );
+
+    // for (const ahu of ahus.recordset) {
+    //   const ahuId = ahu.id;
+    //   const lastcleaningdate = new Date(ahu.LastCleaningdate);
+    //   const cleaningFreq = ahu.cleaningFreqAllowance || 0;
+    //   const cleaningDays = ahu.cleaningdays || 0;
+
+    //   // Check if already scheduled today
+    //   const checkResult = await pool.request()
+    //     .input('FilterId', sql.Int, ahuId)
+    //     .input('ScheduledDate', sql.Date, todayDate)
+    //     .query(`
+    //       SELECT COUNT(*) AS count FROM dbo.AHUCleaningSchedule
+    //       WHERE FilterId = @FilterId AND ScheduledDate = @ScheduledDate
+    //     `);
+      // Return inserted rows
+    res.json({
+      message: `${result.recordset.length} schedule(s) inserted.`,
+      inserted: result.recordset.map(r => ({
+        FilterId: r.FilterId,
+        ScheduledDate: r.ScheduledDate.toISOString().split('T')[0]
+      }))
+    });
+    //   if (checkResult.recordset[0].count > 0) {
+    //     continue;
+    //   }
+
+    //   // Get last schedule
+    //   const lastScheduleResult = await pool.request()
+    //     .input('FilterId', sql.Int, ahuId)
+    //     .query(`
+    //       SELECT TOP 1 ScheduledDate FROM dbo.AHUCleaningSchedule
+    //       WHERE FilterId = @FilterId
+    //       ORDER BY ScheduledDate DESC
+    //     `);
+
+    //   if (lastScheduleResult.recordset.length > 0) {
+    //     const lastScheduled = new Date(lastScheduleResult.recordset[0].ScheduledDate);
+    //     const nextDue = new Date(lastScheduled);
+    //     nextDue.setDate(nextDue.getDate() + cleaningDays);
+
+    //     const startDate = new Date(nextDue);
+    //     startDate.setDate(startDate.getDate() - cleaningFreq);
+    //     const endDate = new Date(nextDue);
+    //     endDate.setDate(endDate.getDate() + cleaningFreq);
+
+    //     if (todayDate >= startDate && todayDate <= endDate) {
+    //       await pool.request()
+    //         .input('FilterId', sql.Int, ahuId)
+    //         .input('ScheduledDate', sql.Date, todayDate)
+    //         .query(`
+    //           INSERT INTO dbo.AHUCleaningSchedule (FilterId, ScheduledDate)
+    //           VALUES (@FilterId, @ScheduledDate)
+    //         `);
+    //       inserted.push({ FilterId: ahuId, ScheduledDate: todayDate.toISOString().split('T')[0] });
+    //     }
+    //   } else {
+    //     // No schedule yet → use installed date ± allowance
+    //     const startDate = new Date(lastcleaningdate);
+    //     startDate.setDate(startDate.getDate() - cleaningFreq);
+    //     const endDate = new Date(lastcleaningdate);
+    //     endDate.setDate(endDate.getDate() + cleaningFreq);
+
+    //     if (todayDate >= startDate && todayDate <= endDate) {
+    //       await pool.request()
+    //         .input('FilterId', sql.Int, ahuId)
+    //         .input('ScheduledDate', sql.Date, todayDate)
+    //         .query(`
+    //           INSERT INTO dbo.AHUCleaningSchedule (FilterId, ScheduledDate)
+    //           VALUES (@FilterId, @ScheduledDate)
+    //         `);
+    //       inserted.push({ FilterId: ahuId, ScheduledDate: todayDate.toISOString().split('T')[0] });
+    //     }
+    //   }
+    // }
+
+    // res.json({
+    //   message: `${inserted.length} schedule(s) inserted.`,
+    //   inserted: inserted,
+    // });
+
+    }
+    catch (err) {
+    console.error('Error:', err);
+    res.status(500).send('Internal server error');
+    } finally {
+    // if (pool) {
+    //   await pool.close();
+    // }
+    }
+});
+
+
+// passwordpolicyRoutes.get('/api/printLabel',  (req, res) => {
+//   const { ip, barcode_number, label_text,Remarks ,CreatedBy} = req.query;
+
+//   // Validate required fields
+//   if (!ip || !barcode_number || !label_text) {
+//     return res.status(400).json({
+//       success: false,
+//       message: 'Missing required fields: ip, barcode_number, label_text',
+//     });
+//   }
+
+//   // === Label Setup for 2" x 2" at 203 DPI ===
+//   const labelWidth = 406;          // 2 inches wide
+//   const labelHeight = 406;         // 2 inches tall
+//   const maxCharsPerLine = 15;      // Wrapping threshold
+//   const charWidth = 11;            // Width of a character in dots
+//   const fontHeight = 25;           // Font height in dots
+//   const fontWidth = 15;            // Font width in dots
+//   const topPadding = 70;           // Y-offset for first line
+//   const lineSpacing = 28;          // Space between lines
+//   const leftMargin = 20;           // Reduced left margin (was centered before)
+
+//   // === Wrap Text into Lines ===
+//   const lines = [];
+//   for (let i = 0; i < label_text.length; i += maxCharsPerLine) {
+//     lines.push(label_text.slice(i, i + maxCharsPerLine));
+//   }
+
+//   // === Generate ZPL ===
+// let zpl = `^XA
+// ^CI28
+// ^PW${labelWidth}
+// ^LL${labelHeight}
+// ^LH0,0
+// `;
+
+//   lines.forEach((line, index) => {
+//     const y = topPadding + index * lineSpacing;
+//     zpl += `^FO${leftMargin},${y}^ADN,${fontHeight},${fontWidth}^FD${line}^FS\n`;
+//   });
+
+//   // Barcode just below text
+//   const barcodeY = topPadding + lines.length * lineSpacing + 10;
+
+//   zpl += `
+// ^FO${leftMargin},${barcodeY}
+// ^BY3,3,100
+// ^BCN,100,Y,N,N
+// ^FD${barcode_number}^FS
+// ^XZ`;
+
+//   // === Send to Zebra Printer ===
+//   const client = new net.Socket();
+
+//   client.connect(9100, ip, () => {
+//     client.write(zpl);
+//     client.end();
+//     data = {BarCode:barcode_number,Remarks:Remarks,CreatedBy:CreatedBy,isPrinted:1}
+//     handleRecordWithOutRes( data, OperationEnums().BarCodePrintingHistory);
+//     res.json({ success: true, message: '✅ ZPL print job sent successfully.' });
+//   });
+
+//   client.on('error', (err) => {
+//     data = {BarCode:barcode_number,Remarks:'Failed to send print job',CreatedBy:CreatedBy,isPrinted:0}
+//     handleRecordWithOutRes( data, OperationEnums().BarCodePrintingHistory);
+//     res.status(500).json({
+//       success: false,
+//       message: '❌ Failed to send print job',
+//       error: err.message,
+//     });
+//   });
+// });
+
+// sql.connect(dbConfig).then(() => {
+//   const port = process.env.PORT || 8080;
+//   passwordpolicyRoutes.listen(port, () => {
+//     console.log(`Server running on port ${port}`);
+//   });
+// }).catch(err => {
+//   console.log("DB Connection failed:", err);
+// });
+
+// passwordpolicyRoutes.get("/api/printLabel", (req, res) => {
+//   const { ip, barcode_number, label_text, Remarks, CreatedBy } = req.query;
+
+//   if (!ip || !barcode_number || !label_text) {
+//     return res.status(400).json({
+//       success: false,
+//       message: "Missing required fields: ip, barcode_number, label_text",
+//     });
+//   }
+
+//   const labelWidth = 406;
+//   const labelHeight = 406;
+//   const leftMargin = 30;
+//   const topPadding = 50;
+//   const fontHeight = 30;
+//   const fontWidth = 25;
+//   const lineSpacing = fontHeight + 10;
+//   const maxCharsPerLine = 28;
+
+//   const lines = [];
+//   for (let i = 0; i < label_text.length; i += maxCharsPerLine) {
+//     lines.push(label_text.slice(i, i + maxCharsPerLine));
+//   }
+
+//   let zpl = `^XA
+// ^CI28
+// ^PW${labelWidth}
+// ^LL${labelHeight}
+// ^LH0,0
+// `;
+
+//   lines.forEach((line, index) => {
+//     const y = topPadding + index * lineSpacing;
+//     zpl += `^FO${leftMargin},${y}^A0N,${fontHeight},${fontWidth}^FD${line}^FS\n`;
+//   });
+
+//   const barcodeHeight = 140;
+//   const moduleWidth = 2;
+//   const ratio = 3;
+//   const barcodeWidthEstimate = 8 * moduleWidth * 11 + 40;
+//   const barcodeX = (labelWidth - barcodeWidthEstimate) / 2;
+//   const barcodeY = topPadding + lines.length * lineSpacing + 20;
+
+//   zpl += `
+// ^FO${barcodeX.toFixed(0)},${barcodeY}
+// ^BY${moduleWidth},${ratio},${barcodeHeight}
+// ^BCN,${barcodeHeight},Y,N,N
+// ^FD${barcode_number}^FS
+// ^XZ
+// `;
+//   // === Send to Zebra Printer ===
+//   const client = new net.Socket();
+
+//   client.connect(9100, ip, () => {
+//     client.write(zpl);
+//     client.end();
+//     const data = {
+//       BarCode: barcode_number,
+//       Remarks: Remarks,
+//       CreatedBy: CreatedBy,
+//       isPrinted: 1,
+//     };
+//     handleRecordWithOutRes(data, OperationEnums().BarCodePrintingHistory);
+//     res.json({ success: true, message: "Print job sent successfully." });
+//   });
+
+//   client.on("error", (err) => {
+//     const data = {
+//       BarCode: barcode_number,
+//       Remarks: "Failed to send print job",
+//       CreatedBy: CreatedBy,
+//       isPrinted: 0,
+//     };
+//     handleRecordWithOutRes(data, OperationEnums().BarCodePrintingHistory);
+//     res.status(500).json({
+//       success: false,
+//       message: "Failed to send print job",
+//       error: err.message,
+//     });
+//   });
+// });
+
+passwordpolicyRoutes.get("/api/printLabel", (req, res) => {
+  const { ip, barcode_number, label_text, Remarks, CreatedBy } = req.query;
+
+  if (!ip || !barcode_number || !label_text) {
+    return res.status(400).json({
+      success: false,
+      message: "Missing required fields: ip, barcode_number, label_text",
+    });
+  }
+
+  const labelWidth = 406;
+  const labelHeight = 406;
+  const leftMargin = 30;
+  const topPadding = 50;
+  const fontHeight = 30;
+  const fontWidth = 25;
+  const lineSpacing = fontHeight + 10;
+  const maxCharsPerLine = 28;
+
+  const lines = [];
+  for (let i = 0; i < label_text.length; i += maxCharsPerLine) {
+    lines.push(label_text.slice(i, i + maxCharsPerLine));
+  }
+
+  let zpl = `^XA
+^CI28
+^PW${labelWidth}
+^LL${labelHeight}
+^LH0,0
+`;
+
+  lines.forEach((line, index) => {
+    const y = topPadding + index * lineSpacing;
+    zpl += `^FO${leftMargin},${y}^A0N,${fontHeight},${fontWidth}^FD${line}^FS\n`;
+  });
+
+  const barcodeHeight = 140;
+  const moduleWidth = 2.5;
+  const ratio = 3;
+  const barcodeWidthEstimate = 8 * moduleWidth * 11 + 40;
+  const barcodeX = (labelWidth - barcodeWidthEstimate) / 2 - 54;
+  const barcodeY = topPadding + lines.length * lineSpacing + 20;
+
+  zpl += `
+^FO${barcodeX.toFixed(0)},${barcodeY}
+^BY${moduleWidth},${ratio},${barcodeHeight}
+^BCN,${barcodeHeight},Y,N,N
+^FD${barcode_number}^FS
+^XZ
+`;
+  // === Send to Zebra Printer ===
+  const client = new net.Socket();
+
+  client.connect(9100, ip, () => {
+    client.write(zpl);
+    client.end();
+    const data = {
+      BarCode: barcode_number,
+      Remarks: Remarks,
+      CreatedBy: CreatedBy,
+      isPrinted: 1,
+    };
+    handleRecordWithOutRes(data, OperationEnums().BarCodePrintingHistory);
+    res.json({ success: true, message: "Print job sent successfully." });
+  });
+
+  client.on("error", (err) => {
+    const data = {
+      BarCode: barcode_number,
+      Remarks: "Failed to send print job",
+      CreatedBy: CreatedBy,
+      isPrinted: 0,
+    };
+    handleRecordWithOutRes(data, OperationEnums().BarCodePrintingHistory);
+    res.status(500).json({
+      success: false,
+      message: "Failed to send print job",
+      error: err.message,
+    });
+  });
+});
+
+passwordpolicyRoutes.get('/checkPasswordExpiry', async (req, res) => {
+    try {
+        await dbUtility.initializePool();
+        const pool = await dbUtility.getPool();
+
+        // Fetch users expiring in 2, 1, or 0 days
+        // const result = await pool.request().query(`
+        //     SELECT 
+        //         pu.UserID,
+        //         pu.Email AS Username,
+        //         pu.Role,
+        //         r.Name AS RoleName,
+        //         us.PasswordExpiryDate,
+        //         DATEDIFF(DAY, GETDATE(), us.PasswordExpiryDate) AS DaysRemaining
+        //     FROM [dbo].[Users] pu
+        //     INNER JOIN [dbo].[Roles] r 
+        //         ON r.ID = pu.Role
+        //     INNER JOIN [dbo].[UserSecurity] us 
+        //         ON us.UserID = pu.UserID
+        //     WHERE 
+        //         pu.IsActive = 1
+        //         AND pu.IsTerminated = 0
+        //         AND DATEDIFF(DAY, GETDATE(), us.PasswordExpiryDate) IN (2, 1, 0)
+        // `);
+
+        const result = await pool.request().query(`
+            DECLARE @notifyBeforeDays INT;
+
+SELECT TOP 1 @notifyBeforeDays = notifyBeforeDays 
+FROM [dbo].[PasswordPolicy];
+
+SELECT 
+    pu.UserID,
+    pu.Email AS Username,
+    pu.Role,
+    r.Name AS RoleName,
+    us.PasswordExpiryDate,
+    DATEDIFF(DAY, GETDATE(), us.PasswordExpiryDate) AS DaysRemaining
+FROM [dbo].[Users] pu
+INNER JOIN [dbo].[Roles] r 
+    ON r.ID = pu.Role
+INNER JOIN [dbo].[UserSecurity] us 
+    ON us.UserID = pu.UserID
+WHERE 
+    pu.IsActive = 1
+    AND pu.IsTerminated = 0
+    AND DATEDIFF(DAY, GETDATE(), us.PasswordExpiryDate) BETWEEN 0 AND @notifyBeforeDays;
+        `);
+
+        const users = result.recordset;
+        let inserted = [];
+
+        for (const u of users) {
+            const expiryDate = u.PasswordExpiryDate.toISOString().split('T')[0];
+            const daysText = u.DaysRemaining === 0 ? 'today' : `${u.DaysRemaining} day(s)`;
+            
+            // Message for Admin
+            const adminMessage = `${u.Username} , ${expiryDate} , ${u.RoleName} password will expire in ${daysText}`;
+
+            // Message for User
+            const userMessage = `Your password will expire in ${daysText} (${expiryDate}). Please update it.`;
+
+            // Insert notification for Admin
+            await pool.request()
+                .input('Title', sql.NVarChar(255), 'Password Expiry')
+                .input('Message', sql.NVarChar(sql.MAX), adminMessage)
+                .input('RoleID', sql.Int, 2) // Admin RoleID
+                .input('Type', sql.NVarChar(20), 'role')
+                .query(`
+                    INSERT INTO Notifications (Title, Message, RoleID, Type)
+                    VALUES (@Title, @Message, @RoleID, @Type)
+                `);
+
+            // Insert notification for User
+            await pool.request()
+                .input('Title', sql.NVarChar(255), 'Password Expiry')
+                .input('Message', sql.NVarChar(sql.MAX), userMessage)
+                .input('UserID', sql.Int, u.UserID)
+                .input('Type', sql.NVarChar(20), 'user')
+                .query(`
+                    INSERT INTO Notifications (Title, Message, UserID, Type)
+                    VALUES (@Title, @Message, @UserID, @Type)
+                `);
+
+            inserted.push({ Username: u.Username, DaysRemaining: u.DaysRemaining });
+        }
+
+        res.json({ message: `${inserted.length} notifications added (Admin + User)`, data: inserted });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Internal server error');
+    }
+});
+
+
+module.exports = {
+  passwordpolicyRoutes
+};

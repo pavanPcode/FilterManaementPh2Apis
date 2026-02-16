@@ -1,0 +1,66 @@
+1.added usertype in  dbo.pereco_Users
+2.added usertype in Roles
+3.get getAllUsers screeenaoperation added usertype
+4.get getRoles added usertype bit
+5.ADDED AFID COUMN AND screeenaoperation record
+6.added rfid in [dbo].[AssetItem]
+        alter table [dbo].[AssetItem]
+        add Rfid varchar(30)
+
+
+
+changed table name assetitem to filter and hostitem to ahu
+added checklist table
+created Areas and BlockAreas tables
+
+
+created this columns 
+
+alter table AHU
+add BlockId INT ;
+
+alter table AHU
+add Areaid INT ;
+
+alter table AHU
+add ProcessType INT ;
+
+alter table AHU
+Add ScheduleDate   DATE NULL ;
+
+alter table AHU
+Add    FreqAllowanceDays  INT NULL ;
+
+alter table ahu 
+add cleaningDays int
+
+------------------------
+CREATED   - [dbo].[fn_GetEffectiveLocationRfID]
+
+CREATED - [dbo].[SP_CheckOrderedStageRfId]
+
+--------------------------
+
+created PressureGroups table
+-------------------
+	alter table [dbo].[Pressure]
+	add PressureGroupId int
+
+ -----------------------       -----------------------------
+
+alter table [dbo].[Users]
+add [SessionId] [uniqueidentifier] NULL
+
+alter table [dbo].[Users]
+add [Loginversion] [int]  NULL
+
+-------------------------------
+
+alter table AHUCleaningSchedule
+add AHUId int
+
+
+---------------------------
+
+update ahu set BlockId = 11 , Areaid = 8 ,ProcessType = 1 ,FreqAllowanceDays = 5,cleaningDays = 30 , ScheduleDate = '2026-01-01'
+where id between 1  and 1873
